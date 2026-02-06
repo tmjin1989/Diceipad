@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>3D Dice Custom Pro</title>
+    <style>
+        :root { --theme-color: #E1FF04; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: -apple-system, sans-serif; touch-action: none; }
+        
+        /* 側邊選單 */
+        #menu { 
+            position: absolute; top: 0; left: 0; width: 280px; height: 100%; 
+            background: rgba(0, 0, 0, 0.9); backdrop-filter: blur(15px);
+            color: var(--theme-color); padding: 25px; z-index: 1000;
+            transform: translateX(-100%); transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            box-sizing: border-box; border-right: 2px solid var(--theme-color);
+        }
+        #menu.active { transform: translateX(0); }
+
+        /* 按鈕樣式 */
+        #toggle-btn {
+            position: absolute; top: 20px; left: 20px; width: 50px; height: 50px;
+            background: rgba(0, 0, 0, 0.5); border: 1.5px solid var(--theme-color); border-radius: 50%;
+            color: var(--theme-color); font-size: 24px; cursor: pointer; z-index: 1001; 
+        }
+
+        #footer {
+            position: absolute; bottom: 40px; left: 0; width: 100%;
+            display: flex; justify-content: center; z-index: 900;
+        }
+        #roll-btn {
+            width: 70%; max-width: 400px; padding: 22px; 
+            background: var(--theme-color); color: #000;
+            border: none; border-radius: 50px; font-size: 22px; font-weight: 900;
+            box-shadow: 0 0 25px rgba(225, 255, 4, 0.4); text-transform: uppercase;
+        }
+
+        .upload-row { margin-bottom: 18px; border-bottom: 1px solid rgba(225, 255, 4, 0.1); padding-bottom: 10px; }
+        .upload-row label { display: block; font-size: 13px; margin-bottom: 8px; font-weight: bold; }
+        input[type="file"] { color: #888; font-size: 12px; }
+        h2 { color: var(--theme-color); margin-top: 50px; letter-spacing: 1px; }
+    </style>
+</head>
+<body>
+
+<button id="toggle-btn" onclick="toggleMenu()">⚙️</button>
+
+<div id="menu">
+    <h2>TEXTURE SETS</h2>
+    <div id="inputs"></div>
+    <p style="color: #666; font-size: 11px; margin-top: 30px;">iPad Optimized Version 1.0</p>
+</div>
+
+<div id="footer">
+    <button id="roll-btn" onclick="rollDice()">Roll</button>
+</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/+esm"
+        }
+    }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import * as CANNON from 'cannon-es';
+
+    let scene, camera, renderer, world, diceBody, diceMesh;
+    const materials = [];
+    const loader = new THREE.TextureLoader();
+    const THEME_HEX = 0xE1FF04;
+
+    window.toggleMenu = () => {
+        const menu = document.getElementById('menu');
+        menu.classList.toggle('active');
+        document.getElementById('toggle-btn').innerText = menu.classList.contains('active') ? '✕' : '⚙️';
+    };
+
+    init();
+    animate();
+
+    function init() {
+        // --- 3D 渲染設置 ---
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 12, 14);
+        camera.lookAt(0, 0, 0);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 優化 iPad Retina 顯示
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // 燈光
+        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+        const light = new THREE.DirectionalLight(0xffffff, 1.5);
+        light.position.set(5, 15, 5);
+        light.castShadow = true;
+        scene.add(light);
+
+        // --- 物理系統 + 隱形牆 ---
+        world = new CANNON.World({ gravity: new CANNON.Vec3(0, -25, 0) });
+        
+        const createBarrier = (p, q) => {
+            const b = new CANNON.Body({ mass: 0, shape: new CANNON.Plane() });
+            b.position.copy(p); b.quaternion.copy(q);
+            world.addBody(b);
+        };
+        createBarrier(new CANNON.Vec3(0,0,0), new CANNON.Quaternion().setFromEuler(-Math.PI/2,0,0)); // 地面
+        createBarrier(new CANNON.Vec3(-6,0,0), new CANNON.Quaternion().setFromEuler(0,Math.PI/2,0)); // 左牆
+        createBarrier(new CANNON.Vec3(6,0,0), new CANNON.Quaternion().setFromEuler(0,-Math.PI/2,0)); // 右牆
+        createBarrier(new CANNON.Vec3(0,0,-6), new CANNON.Quaternion().setFromEuler(0,0,0));         // 前牆
+        createBarrier(new CANNON.Vec3(0,0,6), new CANNON.Quaternion().setFromEuler(0,Math.PI,0));    // 後牆
+
+        // 地面視覺 (Grid)
+        const grid = new THREE.GridHelper(20, 20, THEME_HEX, 0x222222);
+        scene.add(grid);
+
+        // --- 骰子初始化 (6面獨立材質) ---
+        const diceGeo = new THREE.BoxGeometry(2, 2, 2);
+        for (let i = 0; i < 6; i++) {
+            materials.push(new THREE.MeshStandardMaterial({ 
+                color: THEME_HEX, 
+                emissive: THEME_HEX,
+                emissiveIntensity: 0.1,
+                roughness: 0.2
+            }));
+        }
+        diceMesh = new THREE.Mesh(diceGeo, materials);
+        diceMesh.castShadow = true;
+        scene.add(diceMesh);
+
+        diceBody = new CANNON.Body({ 
+            mass: 1.5, 
+            shape: new CANNON.Box(new CANNON.Vec3(1, 1, 1)),
+            material: new CANNON.Material({ friction: 0.1, restitution: 0.6 })
+        });
+        diceBody.position.set(0, 5, 0);
+        world.addBody(diceBody);
+
+        // --- UI 生成 ---
+        const inputArea = document.getElementById('inputs');
+        for (let i = 0; i < 6; i++) {
+            const div = document.createElement('div');
+            div.className = 'upload-row';
+            div.innerHTML = `<label>SIDE ${i+1}</label><input type="file" accept="image/*" onchange="window.handleUpload(event, ${i})">`;
+            inputArea.appendChild(div);
+        }
+
+        window.handleUpload = (e, i) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            loader.load(url, t => {
+                materials[i].map = t;
+                materials[i].color.set(0xffffff); // 轉為白色以顯示圖片原色
+                materials[i].emissiveIntensity = 0; 
+                materials[i].needsUpdate = true;
+            });
+        };
+
+        window.rollDice = () => {
+            if (document.getElementById('menu').classList.contains('active')) toggleMenu();
+            diceBody.position.set(0, 6, 0);
+            diceBody.velocity.set(Math.random()*12-6, 10, Math.random()*12-6);
+            diceBody.angularVelocity.set(Math.random()*20, Math.random()*20, Math.random()*20);
+        };
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        world.fixedStep();
+        diceMesh.position.copy(diceBody.position);
+        diceMesh.quaternion.copy(diceBody.quaternion);
+        renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
